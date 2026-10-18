@@ -4,7 +4,7 @@
 
 A DSH (DeepSeek Harness) desktop plugin that puts a **"DSH Session Cleaner"** into the app: every session's `···` menu gets a red **Delete** item (below "Archive") that moves the session into a recycle bin, and the sidebar footer gets a **Session Recycle Bin** entry with search, restore and permanent deletion.
 
-Deleting a session is not just moving its log directory: every trace it left in DSH is handled too — the workspace accounting slot, its pin, its archive flag, and the projection-cache row (including the host's `.bak` copies). Restoring puts each of those back, **including the session's original position in the sidebar**. Permanently deleting a binned session also clears the schedules bound to it and removes its project directory once it is empty.
+Deleting a session is not just moving its log directory: every trace it left in DSH is handled too — the workspace accounting slot, its pin, its archive flag, and the projection-cache row (including the host's `.bak` copies). **A session with subagents moves as a whole tree**: the host cascades agent disposal only, so a child session's log directory, accounting and cache row would otherwise survive the parent. Restoring puts each of those back, **including the session's original position in the sidebar**. Permanently deleting a binned session also clears the schedules bound to it and removes its project directory once it is empty.
 
 ## Screenshots
 
@@ -38,6 +38,14 @@ Grab the latest archive from the [Releases page](https://github.com/jackxiao17/d
    ```
 4. Restart DSH; the plugin shows up on DSH's plugin management page
 
+## Compatibility
+
+- **Verified live on DeepSeek Harness `0.2.1-rc.2`** (desktop build, the `dsh web` web profile): delete, restore (including the original sidebar position), permanent delete, the subagent cascade, bin search and the chat-log viewer all pass end to end, and a whole-`~/.dsh` residue scan comes back clean afterwards
+- Every host contract it relies on was checked against the `0.2.1-rc.2` source: session log format v4 and its zstd frame layout, the `session_projcache` storage domain v7, the `workspaceRegistry` / `schedule` / `storageDomain` / `webServer` services, and the client slots plus `__ModuleLoader__`
+- **Backward compatibility is not verified, so it is not promised.** What can be said is how it fails: every host API call is guarded by an existence check and falls back to the equivalent file-level path, so on an older build the worst case is **less functionality** (for example the slot cannot be restored, so the session returns to the top of the sidebar — reported honestly), never deleting the wrong thing or leaving invisible garbage
+- `0.1.x` is untested: that line went through v0→v4 format migrations and large API changes, so it is not recommended
+- If a major DSH upgrade breaks the plugin, the symptom is a missing menu item/button or an error on an action — session data is never harmed. Binned data stays under `~/.dsh/dsh-session-cleaner/trash/` and can be moved back by hand to `sessions/<proj>/<id>/`
+
 ## Usage
 
 1. Session `···` → **Delete**: moves straight into the recycle bin, with a "✓ session moved to the recycle bin" toast (no confirm dialog — it is recoverable)
@@ -60,6 +68,7 @@ Grab the latest archive from the [Releases page](https://github.com/jackxiao17/d
 | Global pin set `pinnedSessionIds` | removed (its rank is recorded) | restored at its rank | — |
 | Projection-cache row `storages/session_projcache/sessions/<id>.json` | removed through the host storage domain, snapshot kept verbatim | written back (file + host memory table) | re-checked, plus `<id>.json.bak.*` |
 | Schedules bound to the session (`schedule` domain) | **left alone**: snapshotted for display | nothing to restore (never touched) | removed (active + already-ended rows) |
+| Its subagents (`origin: subagent` + `parentSession` pointing at it) | moved into the bin item's `.children/`, each with its own snapshot | restored with it (directory / slot / cache row / pin / archive) | removed with it (cache row + schedules + emptied project dir) |
 | `<dshHome>/sessions/<proj>/` project directory | — | recreated when needed | removed once empty |
 
 ## Known limits
@@ -69,7 +78,7 @@ Grab the latest archive from the [Releases page](https://github.com/jackxiao17/d
 - **Schedules are not removed while a session sits in the bin**: for a reminder whose session is gone the host only logs a warning — it does not recreate the session and does not retry. Use "delete forever" to clear them. The reason for the split is that the host's `schedule` service **cannot recreate a task faithfully** (a new task gets a new id and an empty delivery history), so deleting at bin time would make a reversible step irreversible
 - **Restore is not guaranteed to be byte-identical to the moment before deletion**: an archived session returns into the archive (it does not jump into the sidebar), and if its anchor session has been deleted it stays at the top of the sidebar (the panel reports "position not restored" honestly)
 - **Two log directories for the same id are refused**: that is a corrupt layout the host itself refuses to resolve, so the plugin lists the paths for you to handle by hand instead of deleting one copy, leaving the other, and reporting success
-- **Crash safety**: the snapshot is written before the files move and upgraded to its final state afterwards; startup runs a two-way reconciliation — a leftover "never moved" snapshot is rolled back, and a bin directory without a snapshot is adopted as a "data incomplete" entry (visible and permanently deletable, but not restorable, because its original path is unknowable)
+- **Crash safety**: the snapshot is written before the files move and upgraded to its final state afterwards; startup runs a two-way reconciliation — a leftover "never moved" snapshot is rolled back (with subagents this is all-or-nothing: if any member is still at home, the ones already moved go back), and a bin directory without a snapshot is adopted as a "data incomplete" entry (visible and permanently deletable, but not restorable, because its original path is unknowable)
 - **0.7.0 removed two HTTP endpoints nobody called**: `POST /delete` (physical delete without the bin) and `POST /status`. Deletion now has a single path: move to the bin → delete forever
 - Verified on the local desktop build (the `dsh web` web profile) only; no other deployment shape was tested
 
@@ -126,6 +135,15 @@ node scripts\verify.mjs
 Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
+
+### 0.7.1 (subagent cascade + alignment with 0.2.1)
+
+- **A session's subagents are handled with it**: the host cascades agent disposal only, so a child session's log directory, accounting and projection-cache row used to survive the parent. Descendants are now discovered the way the host decides parentage (`origin: 'subagent'` + `parentSession`), and the whole tree moves to the bin, back, and out for good together; child directories live under the parent item's `.children/`, and startup reconciliation rolls back a half-moved tree all-or-nothing
+- **Fixed an encoding mismatch**: the session directory name now mirrors the host's `encodeSegment()` (safe code units literal, everything else `~XXXX`); it previously mirrored the project-level `projectKey()` (`--…--` form). Host-minted ids are all safe characters so there was no practical impact, but an id needing escaping would not have been found
+- **Removed two host-detached code paths**: `persistence.resolveLog` no longer exists in current builds, and `locate({id})` needs the stored header's `cwd` to name the project segment (an id alone resolves to `_no-cwd`). Directory discovery now follows the host's own path computation instead
+- **Dropped a peerDependency pointing at the wrong package**: it declared the unscoped `cordis` (an unrelated third-party package) while DSH ships `@deepseek-ai/cordis`, and the plugin imports neither. Leaving it in could pull an extra package into someone's install
+- Compatibility audited against DeepSeek Harness **0.2.1-rc.2** end to end (log format v4, zstd frame layout, projection-cache domain v7, workspaceRegistry / schedule / storageDomain / webServer contracts, client slots and `__ModuleLoader__`): nothing incompatible, and the whole delete → restore → permanent-delete cycle was exercised live on that build (subagent cascade included, plus a residue scan)
+- The verification harness grew to **207 assertions**, adding the subagent cascade, half-move crash rollback, encoder alignment and the three projection-cache deletion paths
 
 ### 0.7.0 (deep cleaning)
 

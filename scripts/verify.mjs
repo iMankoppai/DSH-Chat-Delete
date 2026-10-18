@@ -1,7 +1,7 @@
 // dsh-session-cleaner 验证台：node scripts/verify.mjs
 // 维护者工具（不参与插件运行、不进发行包）。用 mock 宿主 + 真实文件系统，把删除 / 恢复 / 彻底删除 / 启动对账 / 过期清理 /
 // 重复目录 / 孤儿项 这些路径真跑一遍。
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, rename, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve, relative, isAbsolute } from "node:path";
@@ -80,11 +80,18 @@ function makeHost(home, opts = {}) {
   };
 
   const projRows = new Map();
+  // domainAbsent 复现真机场景：记录是宿主启动后才写到磁盘的，不在域启动时载入的
+  // 内存表里 —— 此时 delete 返回 false 且不碰磁盘，插件必须回落到文件删除并如实回报。
   const domainTable = {
-    async delete(key) { projRows.set(key, "deleted-by-domain"); await rm(join(home, "storages", "session_projcache", "sessions", `${key}.json`), { force: true }); return true; },
+    async delete(key) {
+      if (opts.domainAbsent) return false;
+      projRows.set(key, "deleted-by-domain");
+      await rm(join(home, "storages", "session_projcache", "sessions", `${key}.json`), { force: true });
+      return true;
+    },
     async put(key, value) { projRows.set(key, value); return undefined; }
   };
-  const storageDomain = { get: (name) => (name === "session_projcache" ? { table: () => domainTable } : undefined) };
+  const storageDomain = opts.noStorageDomain ? undefined : { get: (name) => (name === "session_projcache" ? { table: () => domainTable } : undefined) };
 
   const schedules = [
     { id: "schedule-aaaa", sessionId: SID, status: "active", kind: "at", title: "提醒", prompt: "p", scheduledAt: "2099-01-01T00:00:00.000Z" },
@@ -149,7 +156,12 @@ for (const bad of ["", "  ", ".", "..", "a/b", "a\\b", "a:b", "x\u0000y", "trail
   ok(threw, `assertSessionId 拒绝 ${JSON.stringify(bad)}`);
 }
 eq(mod.assertSessionId(SID), SID, "assertSessionId 放行正常 id");
-ok(mod.encodeSessionSegment("a/b:c").startsWith("--"), "encodeSessionSegment 生成目录段");
+// 会话目录名用宿主的 encodeSegment：安全字符原样，其余转 ~XXXX。
+// 注意 assertSessionId 已经拒绝 / \ : 等字符，所以这里用"能过校验但仍需转义"的字符。
+eq(mod.encodeSessionSegment(SID), SID, "正常 id 的目录名就是 id 本身（与磁盘一致）");
+eq(mod.encodeSessionSegment("a~b"), "a~007Eb", "'~' 自身也转义");
+eq(mod.encodeSessionSegment("会话-1"), "~4F1A~8BDD-1", "非 ASCII 字符逐单元转义");
+eq(mod.encodeSessionSegment("a b"), "a~0020b", "空格不在宿主安全字符表里，同样转义");
 {
   const home = await mkdtemp(join(tmpdir(), "dsh-seg-"));
   await mkdir(join(home, "p", SID), { recursive: true });
@@ -182,7 +194,7 @@ console.log("\n[2] 移入回收站 / 恢复");
   ok(existsSync(itemDir), "回收站里出现会话目录");
   ok(!existsSync(join(home, "sessions", PROJ, SID)), "原目录已消失");
   const meta = JSON.parse(await readFile(join(home, "dsh-session-cleaner", "trash", "meta", `${SID}.json`), "utf8"));
-  eq(meta.version, 2, "meta 版本 2");
+  eq(meta.version, 3, "meta 版本 3（带 descendants 字段）");
   eq(meta.stage, "trashed", "meta stage=trashed");
   eq(meta.filesMoved, true, "meta filesMoved=true");
   eq(meta.workspaceAnchorId, ANCHOR, "记下恢复锚点（原后继会话）");
@@ -279,6 +291,148 @@ console.log("\n[4] 同 id 操作串行化");
   ok(existsSync(join(h4.home, "storages", "session_projcache", "sessions", `${SID}.json`)), "刚恢复的缓存行没被误清");
   ok(host4.schedules.some(s => s.sessionId === SID), "刚恢复的会话的定时任务没被误清");
   await rm(h4.home, { recursive: true, force: true });
+}
+
+// ───────────────────────── 4b. 子会话级联 ─────────────────────────
+
+console.log("\n[4b] 子会话（subagent）随父会话一起走");
+{
+  // 一个父会话 + 两个直接子会话 + 一个孙会话，各自带日志、缓存行、记账槽位
+  const CHILD1 = "session-child-0001";
+  const CHILD2 = "session-child-0002";
+  const GRAND = "session-grand-0003";
+  const { home, row } = await makeHome();
+  const mk = async (id, parent) => {
+    await mkdir(join(home, "sessions", PROJ, id), { recursive: true });
+    const header = { type: "session", id, cwd: "F:\\work\\demo", createdAt: 1, isSeeded: false, delegationDepth: parent ? 1 : 0 };
+    if (parent) { header.parentSession = parent; header.origin = "subagent"; }
+    await writeFile(join(home, "sessions", PROJ, id, "session.jsonl"),
+      JSON.stringify(header) + "\n" + JSON.stringify({ type: "turn/start", time: 2 }) + "\n");
+    await writeFile(join(home, "storages", "session_projcache", "sessions", `${id}.json`), row);
+  };
+  await mk(CHILD1, SID);
+  await mk(CHILD2, SID);
+  await mk(GRAND, CHILD1);
+  // 另一个不相干父会话的子会话，绝不能被带进来
+  await mk("session-stranger-0004", "session-someone-else");
+
+  const host = makeHost(home);
+  mod.apply(host.ctx);
+  const trashed = await call(host, "POST", "/trash", { sessionId: SID });
+  eq(trashed.status, 200, "删除带子会话的父会话 → 200");
+  eq(trashed.body.result.descendantsCount, 3, "发现 3 个后代（2 子 + 1 孙）");
+  ok(trashed.body.result.descendants.every(d => d.filesMoved === true), "每个后代的目录都搬走了");
+  for (const id of [SID, CHILD1, CHILD2, GRAND]) {
+    ok(!existsSync(join(home, "sessions", PROJ, id)), `${id} 的原目录已消失`);
+    ok(!existsSync(join(home, "storages", "session_projcache", "sessions", `${id}.json`)), `${id} 的投影缓存行已删`);
+  }
+  ok(existsSync(join(home, "sessions", PROJ, "session-stranger-0004")), "别人的子会话没被牵连");
+  ok(existsSync(join(home, "dsh-session-cleaner", "trash", "items", SID, ".children", CHILD1)), "子会话目录在父项的 .children/ 下");
+  ok(existsSync(join(home, "dsh-session-cleaner", "trash", "items", SID, ".children", GRAND)), "孙会话也在");
+
+  // 恢复：父 + 全部后代一起回位，缓存行逐字还原
+  const restored = await call(host, "POST", "/trash/restore", { sessionId: SID });
+  eq(restored.status, 200, "恢复整棵树 → 200");
+  eq(restored.body.result.descendantsCount, 3, "回报恢复了 3 个后代");
+  for (const id of [SID, CHILD1, CHILD2, GRAND]) {
+    ok(existsSync(join(home, "sessions", PROJ, id)), `${id} 目录回位`);
+    eq(await readFile(join(home, "storages", "session_projcache", "sessions", `${id}.json`), "utf8"), row, `${id} 缓存行原文还原`);
+  }
+  ok(!existsSync(join(home, "dsh-session-cleaner", "trash", "items", SID)), "回收站里的父项已清空");
+  await rm(home, { recursive: true, force: true });
+
+  // 彻底删除：父 + 后代一起没，缓存行/定时任务/工程目录都收尾
+  const h5 = await makeHome();
+  // 子会话单独造（父会话已由 makeHome 建好）
+  const mkChild = async (id, parent) => {
+    await mkdir(join(h5.home, "sessions", PROJ, id), { recursive: true });
+    await writeFile(join(h5.home, "sessions", PROJ, id, "session.jsonl"),
+      JSON.stringify({ type: "session", id, cwd: "F:\\work\\demo", createdAt: 1, isSeeded: false, delegationDepth: 1, parentSession: parent, origin: "subagent" }) + "\n");
+    await writeFile(join(h5.home, "storages", "session_projcache", "sessions", `${id}.json`), row);
+  };
+  await mkChild(CHILD1, SID);
+  await mkChild(GRAND, CHILD1);
+  const host5 = makeHost(h5.home);
+  mod.apply(host5.ctx);
+  await call(host5, "POST", "/trash", { sessionId: SID });
+  // 给父子都挂上定时任务，验证彻底删除时一起清
+  host5.schedules.push({ id: "schedule-p", sessionId: SID, status: "active", kind: "at", title: "t", prompt: "p", scheduledAt: "2099-01-01T00:00:00.000Z" });
+  host5.schedules.push({ id: "schedule-c", sessionId: CHILD1, status: "active", kind: "at", title: "t", prompt: "p", scheduledAt: "2099-01-01T00:00:00.000Z" });
+  const purged = await call(host5, "POST", "/trash/delete", { sessionIds: [SID] });
+  eq(purged.body.result.results[0].deleted, true, "彻底删除父会话");
+  eq(purged.body.result.results[0].descendantsPurged, 2, "回报清掉了 2 个后代");
+  for (const id of [SID, CHILD1, GRAND]) {
+    ok(!existsSync(join(h5.home, "storages", "session_projcache", "sessions", `${id}.json`)), `${id} 缓存行彻底清掉`);
+    ok(!host5.schedules.some(s => s.sessionId === id), `${id} 的定时任务已清`);
+  }
+  ok(!existsSync(join(h5.home, "dsh-session-cleaner", "trash", "items", SID)), "回收站目录（含 .children）已删");
+  await rm(h5.home, { recursive: true, force: true });
+
+  // 崩溃窗口：父会话搬走了、子会话还没搬（stage=prepared）。
+  // 对账必须"全有或全无"——把已搬走的父会话搬回原位，而不是留半棵在回收站里。
+  const h6 = await makeHome();
+  const mkChild6 = async (id, parent) => {
+    await mkdir(join(h6.home, "sessions", PROJ, id), { recursive: true });
+    await writeFile(join(h6.home, "sessions", PROJ, id, "session.jsonl"),
+      JSON.stringify({ type: "session", id, cwd: "F:\\work\\demo", createdAt: 1, isSeeded: false, delegationDepth: 1, parentSession: parent, origin: "subagent" }) + "\n");
+    await writeFile(join(h6.home, "storages", "session_projcache", "sessions", `${id}.json`), row);
+  };
+  await mkChild6(CHILD1, SID);
+  const host6 = makeHost(h6.home);
+  mod.apply(host6.ctx);
+  // 手工制造"搬了一半"：只搬父会话，快照停留在 prepared
+  const binItems = join(h6.home, "dsh-session-cleaner", "trash", "items");
+  const binMeta = join(h6.home, "dsh-session-cleaner", "trash", "meta");
+  await mkdir(binItems, { recursive: true });
+  await mkdir(binMeta, { recursive: true });
+  await rename(join(h6.home, "sessions", PROJ, SID), join(binItems, SID));
+  await writeFile(join(binMeta, `${SID}.json`), JSON.stringify({
+    version: 3, id: SID, stage: "prepared", filesMoved: false,
+    originalDir: join(h6.home, "sessions", PROJ, SID), deletedAt: Date.now(), bytes: 10,
+    descendants: [{ id: CHILD1, originalDir: join(h6.home, "sessions", PROJ, CHILD1), projcacheRow: row }]
+  }));
+  // 重启（重新 apply）触发对账
+  mod.apply(makeHost(h6.home).ctx);
+  await new Promise(r => setTimeout(r, 250));
+  ok(existsSync(join(h6.home, "sessions", PROJ, SID)), "对账把只搬了一半的父会话搬回原位");
+  ok(existsSync(join(h6.home, "sessions", PROJ, CHILD1)), "没搬过的子会话还在原位");
+  ok(!existsSync(join(binItems, SID)), "回收站里不留半棵树");
+  ok(!existsSync(join(binMeta, `${SID}.json`)), "半途快照被撤掉");
+  await rm(h6.home, { recursive: true, force: true });
+}
+
+// ───────────────────────── 4c. 缓存行删除的三种落点 ─────────────────────────
+
+console.log("\n[4c] 投影缓存行删除：域表 / 文件 / 回报如实");
+{
+  // 场景一（真机最常见）：记录不在域的内存表里 → delete 返回 false 且不碰磁盘，
+  // 必须回落到文件删除，且 cacheViaService 要如实回报 false
+  const { home } = await makeHome();
+  const host = makeHost(home, { domainAbsent: true });
+  mod.apply(host.ctx);
+  const r1 = await call(host, "POST", "/trash", { sessionId: SID });
+  eq(r1.body.result.cacheRemoved, true, "域表说没有 → 文件仍然删掉了");
+  eq(r1.body.result.cacheViaService, false, "如实回报不是走域表删的");
+  ok(!existsSync(join(home, "storages", "session_projcache", "sessions", `${SID}.json`)), "磁盘上确实没有了");
+  await rm(home, { recursive: true, force: true });
+
+  // 场景二：域表里有记录 → 走域表，回报 true
+  const h2 = await makeHome();
+  const host2 = makeHost(h2.home);
+  mod.apply(host2.ctx);
+  const r2 = await call(host2, "POST", "/trash", { sessionId: SID });
+  eq(r2.body.result.cacheViaService, true, "域表里有记录 → 走域表并如实回报");
+  eq(host2.projRows.get(SID), "deleted-by-domain", "确实是域表删的");
+  await rm(h2.home, { recursive: true, force: true });
+
+  // 场景三：存储域服务根本没挂 → 只有文件删除，回报 false
+  const h3 = await makeHome();
+  const host3 = makeHost(h3.home, { noStorageDomain: true });
+  mod.apply(host3.ctx);
+  const r3 = await call(host3, "POST", "/trash", { sessionId: SID });
+  eq(r3.body.result.cacheRemoved, true, "没有存储域服务也能删掉缓存行");
+  eq(r3.body.result.cacheViaService, false, "如实回报没走域表");
+  await rm(h3.home, { recursive: true, force: true });
 }
 
 // ───────────────────────── 5. 边界与错误路径 ─────────────────────────

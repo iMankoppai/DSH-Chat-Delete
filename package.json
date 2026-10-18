@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-cleaner",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "DSH 会话清理插件：侧栏会话「···」菜单一键移入回收站，回收站支持搜索、恢复与彻底删除。删除时同步摘掉工作区记账、置顶与归档标记，并清掉投影缓存行（含备份文件）；彻底删除时再清掉绑定该会话的定时任务与空掉的工程目录。恢复时逐项还原，包括侧栏原位置。",
   "license": "MIT",
   "keywords": [
@@ -44,9 +44,6 @@
       ],
       "platform": "web"
     }
-  },
-  "peerDependencies": {
-    "cordis": ">=4.0.0-rc <5"
   },
   "engines": {
     "node": "^22.15.0 || >=24.0.0"
