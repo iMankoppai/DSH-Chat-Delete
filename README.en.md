@@ -136,6 +136,13 @@ Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
 
+### 0.7.2 (plugin-page icon & localization + two fixes)
+
+- **The plugin page now has its own icon, title and description**: added `icon.svg` plus `meta.title` / `meta.description` in `locale/zh.json` and `locale/en.json`, so DSH shows "会话清理 / Session Cleaner" in the current UI language; the release script also packs the icon and locale files into the zip, so people who download the release artifact see them too
+- **Fixed a bloated recycle-bin list response**: `/trash/list` used to include each session's verbatim projection-cache row (`projcacheRow`, potentially large), contradicting the "display fields only" intent; the list no longer carries it (restore / permanent delete still read it from the meta file)
+- **Fixed a half-broken state on reconciliation rollback**: if the process crashed right after moving the parent but before moving its children, the rollback only renamed the directory back, losing the projection-cache row, sidebar accounting and pin/archive flags; the rollback now reuses the restore path and brings those back too
+- Added an assertion that locks the "list carries no projection-cache row" behavior (208 total)
+
 ### 0.7.1 (subagent cascade + alignment with 0.2.1)
 
 - **A session's subagents are handled with it**: the host cascades agent disposal only, so a child session's log directory, accounting and projection-cache row used to survive the parent. Descendants are now discovered the way the host decides parentage (`origin: 'subagent'` + `parentSession`), and the whole tree moves to the bin, back, and out for good together; child directories live under the parent item's `.children/`, and startup reconciliation rolls back a half-moved tree all-or-nothing
