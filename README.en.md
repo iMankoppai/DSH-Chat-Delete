@@ -144,10 +144,14 @@ Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
 
-### 0.8.1 (batch selection + restore & open)
+### 0.8.2 (drop "Restore & open")
+
+- Removed the per-row "Open" action: after restoring, the session is already back in the sidebar, while the settings dialog does not close itself — an extra step for little benefit
+- Batch selection and the rest are unchanged
+
+### 0.8.1 (batch selection)
 
 - Both tabs (Archived / Recycle bin) support batch selection: select all, batch unarchive, batch move to the recycle bin, batch restore, batch permanent delete
-- Each recycle-bin row gets an "Open" action: restores the session and switches to it (falls back to restore-only when the host exposes no open API)
 - The verification harness still passes all 257 checks
 
 ### 0.8.0 (settings-page manager + archived view)
