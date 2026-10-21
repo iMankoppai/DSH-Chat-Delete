@@ -144,6 +144,11 @@ Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
 
+### 0.8.3 (selection mode)
+
+- Batch operations now use a "Select multiple" mode: checkboxes stay hidden until you enter it, then you can select all / run batch actions and leave with "Exit selection"
+- "Search content" moved onto the same row as "Select multiple" (Archived tab only)
+
 ### 0.8.2 (drop "Restore & open")
 
 - Removed the per-row "Open" action: after restoring, the session is already back in the sidebar, while the settings dialog does not close itself — an extra step for little benefit
