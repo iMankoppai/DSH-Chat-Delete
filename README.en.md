@@ -2,9 +2,15 @@
 
 **[简体中文](README.md) | English**
 
-A DSH (DeepSeek Harness) desktop plugin that puts a **"DSH Session Cleaner"** into the app: every session's `···` menu gets a red **Delete** item (below "Archive") that moves the session into a recycle bin, and the sidebar footer gets a **Session Recycle Bin** entry with search, restore and permanent deletion.
+A DSH (DeepSeek Harness) desktop plugin that puts a **"DSH Session Cleaner"** into the app: every session's `···` menu gets a red **Delete** item (below "Archive") that moves the session into a recycle bin.
+
+**The recycle bin lives in Settings**: Settings → Recycle bin (right below "Plugin market", with a trash icon), laid out like Codex's "Archived chats" — big title + delete-all, search box, workspace filter, sessions grouped by project with counts and dates, and per-row view / delete-forever / restore. The page also has an **Archived** tab: it lists sessions that are archived (not deleted) in DSH, where you can unarchive them or move them to the recycle bin (restorable).
 
 Deleting a session is not just moving its log directory: every trace it left in DSH is handled too — the workspace accounting slot, its pin, its archive flag, and the projection-cache row (including the host's `.bak` copies). **A session with subagents moves as a whole tree**: the host cascades agent disposal only, so a child session's log directory, accounting and cache row would otherwise survive the parent. Restoring puts each of those back, **including the session's original position in the sidebar**. Permanently deleting a binned session also clears the schedules bound to it and removes its project directory once it is empty.
+
+**Fork branches are never deleted along with their parent**: a forked session is an independent copy of the parent's history and records `parentSession` only as lineage metadata. Deleting the parent takes the subagent tree but leaves the fork where it is, and the success toast tells you how many were kept.
+
+Delete, restore and purge each append one JSON line to `~/.dsh/dsh-session-cleaner/audit.log` (time, action, session id, title, size, related counts); a failed audit write never blocks the operation.
 
 ## Screenshots
 
@@ -104,6 +110,8 @@ Key points:
 - **Bump the version in both places while iterating**: `version` in `package.json` and `buildId` in `lib/index.js`. The plugin logs `dsh-session-cleaner v<version>` at startup, so one look at the log after a restart tells you whether the new version really took effect (in 2026-10 a bumped `package.json` with a forgotten `buildId` left the log showing the old number — always change both).
 - Once the change is verified, commit and push to this repository so GitHub matches what you run locally; keep the tag, the Release and the version inside the zip aligned too.
 
+To sync to this machine without publishing, run `scripts/sync-deploy.ps1` (or double-click `scripts/sync-deploy.cmd`): it runs `node --check` on `lib/*.js`, copies them to both install locations above, and reminds you to restart DSH.
+
 ### One-command release script
 
 `scripts/release.ps1` is a maintainer tool (it does not take part in the plugin's runtime and is not packed into the release — `package.json`'s `files` lists `lib`, `cordis.patch.yml` and the READMEs). It does these steps in order:
@@ -135,6 +143,16 @@ node scripts\verify.mjs
 Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
+
+### 0.8.0 (settings-page manager + archived view)
+
+- New full page in Settings: Archived / Recycle bin tabs, with a trash-can nav icon
+- Archived lists sessions that are archived but not deleted: view, unarchive, move to the recycle bin, plus move-all and full-text search
+- Deleting a parent no longer touches fork branches; a fork child's `parentSession` is detached automatically (skipped for logs over 48 MB)
+- "View" now expands inline, with collapsible turns and Markdown replies
+- Archived list reads titles from the projection cache, scans directories once and caches for 60 s — noticeably faster
+- Version shown at the page footer with a "Check for updates" action (compares with upstream, advisory only)
+- Added `scripts/sync-deploy.ps1` / `sync-deploy.cmd`; the verification harness now has 257 checks
 
 ### 0.7.2 (plugin-page icon & localization + two fixes)
 

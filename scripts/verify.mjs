@@ -150,6 +150,10 @@ async function call(host, method, path, body) {
 console.log("\n[1] 纯函数与路径校验");
 eq(mod.name, "dsh-session-cleaner", "导出插件名");
 ok(typeof mod.apply === "function", "导出 apply()");
+{
+  const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8"));
+  eq(mod.version, pkg.version, "导出版本与 package.json 一致");
+}
 for (const bad of ["", "  ", ".", "..", "a/b", "a\\b", "a:b", "x\u0000y", "trail.", "trail ", 'q"q', "a*b"]) {
   let threw = false;
   try { mod.assertSessionId(bad); } catch { threw = true; }
@@ -318,18 +322,30 @@ console.log("\n[4b] 子会话（subagent）随父会话一起走");
   await mk(GRAND, CHILD1);
   // 另一个不相干父会话的子会话，绝不能被带进来
   await mk("session-stranger-0004", "session-someone-else");
+  // fork 分支：同样记录 parentSession，但 origin 不是 subagent（isSeeded=true）。
+  // 它是独立复制的会话，删父会话时必须原地保留。
+  const FORK = "session-fork-0005";
+  await mkdir(join(home, "sessions", PROJ, FORK), { recursive: true });
+  await writeFile(join(home, "sessions", PROJ, FORK, "session.jsonl"),
+    JSON.stringify({ type: "session", id: FORK, cwd: "F:\\work\\demo", createdAt: 1, isSeeded: true, parentSession: SID }) + "\n");
+  await writeFile(join(home, "storages", "session_projcache", "sessions", `${FORK}.json`), row);
 
   const host = makeHost(home);
   mod.apply(host.ctx);
   const trashed = await call(host, "POST", "/trash", { sessionId: SID });
   eq(trashed.status, 200, "删除带子会话的父会话 → 200");
   eq(trashed.body.result.descendantsCount, 3, "发现 3 个后代（2 子 + 1 孙）");
+  eq(trashed.body.result.forkBranchesKept, 1, "fork 分支不算后代，回报保留 1 个");
+  ok(existsSync(join(home, "sessions", PROJ, FORK)), "fork 分支目录原地保留");
+  ok(!existsSync(join(home, "dsh-session-cleaner", "trash", "items", SID, ".children", FORK)), "fork 分支没有进回收站");
+  eq(await readFile(join(home, "storages", "session_projcache", "sessions", `${FORK}.json`), "utf8"), row, "fork 分支的缓存行没被删");
   ok(trashed.body.result.descendants.every(d => d.filesMoved === true), "每个后代的目录都搬走了");
   for (const id of [SID, CHILD1, CHILD2, GRAND]) {
     ok(!existsSync(join(home, "sessions", PROJ, id)), `${id} 的原目录已消失`);
     ok(!existsSync(join(home, "storages", "session_projcache", "sessions", `${id}.json`)), `${id} 的投影缓存行已删`);
   }
   ok(existsSync(join(home, "sessions", PROJ, "session-stranger-0004")), "别人的子会话没被牵连");
+  ok(existsSync(join(home, "sessions", PROJ, FORK)), "恢复前 fork 分支仍在");
   ok(existsSync(join(home, "dsh-session-cleaner", "trash", "items", SID, ".children", CHILD1)), "子会话目录在父项的 .children/ 下");
   ok(existsSync(join(home, "dsh-session-cleaner", "trash", "items", SID, ".children", GRAND)), "孙会话也在");
 
@@ -436,6 +452,90 @@ console.log("\n[4c] 投影缓存行删除：域表 / 文件 / 回报如实");
   eq(r3.body.result.cacheRemoved, true, "没有存储域服务也能删掉缓存行");
   eq(r3.body.result.cacheViaService, false, "如实回报没走域表");
   await rm(h3.home, { recursive: true, force: true });
+}
+
+// ───────────────────────── 4d. 已归档列表 / 取消归档 ─────────────────────────
+
+console.log("\n[4d] 已归档列表与取消归档");
+{
+  const { home, row } = await makeHome();
+  const host = makeHost(home);
+  mod.apply(host.ctx);
+  host.global.archivedSessionIds.push(SID);
+
+  const listed = await call(host, "POST", "/archived/list");
+  eq(listed.status, 200, "POST /archived/list 返回 200");
+  eq(listed.body.result.items.length, 1, "列出 1 个已归档会话");
+  eq(listed.body.result.items[0].id, SID, "归档列表包含该会话");
+  ok(listed.body.result.totalBytes > 0, "归档列表带磁盘占用");
+
+  const archivedDetail = await call(host, "POST", "/archived/detail", { sessionId: SID });
+  eq(archivedDetail.status, 200, "POST /archived/detail 返回 200");
+  eq(archivedDetail.body.result.archived, true, "详情标记为归档会话");
+  ok(Array.isArray(archivedDetail.body.result.questions), "详情返回 questions 数组");
+
+  const byContent = await call(host, "POST", "/archived/search", { keyword: "室分" });
+  eq(byContent.status, 200, "POST /archived/search 返回 200");
+  ok(byContent.body.result.matches[SID] >= 1, "正文搜索命中归档会话");
+
+  const un = await call(host, "POST", "/archived/unarchive", { sessionId: SID });
+  eq(un.status, 200, "POST /archived/unarchive 返回 200");
+  eq(un.body.result.unarchived, true, "取消归档成功");
+  ok(!host.global.archivedSessionIds.includes(SID), "归档集合里已移除");
+
+  // 已归档会话直接移入回收站：快照要记下归档态，恢复时才能回到归档
+  host.global.archivedSessionIds.push(SID);
+  const moved = await call(host, "POST", "/trash", { sessionId: SID });
+  eq(moved.body.result.trashed, true, "已归档会话可移入回收站");
+  const meta = JSON.parse(await readFile(join(home, "dsh-session-cleaner", "trash", "meta", `${SID}.json`), "utf8"));
+  eq(meta.wasArchived, true, "快照记下删除前是归档态");
+  await rm(home, { recursive: true, force: true });
+}
+
+// ───────────────────────── 4e. 全部移入回收站 ─────────────────────────
+
+console.log("\n[4e] 已归档全部移入回收站");
+{
+  const { home } = await makeHome();
+  const host = makeHost(home);
+  mod.apply(host.ctx);
+  host.global.archivedSessionIds.push(SID);
+
+  const all = await call(host, "POST", "/archived/trash-all");
+  eq(all.status, 200, "POST /archived/trash-all 返回 200");
+  eq(all.body.result.moved, 1, "成功移入 1 个");
+  eq(all.body.result.failed, 0, "没有失败项");
+  ok(!host.global.archivedSessionIds.includes(SID), "归档集合已清空该会话");
+
+  const list = await call(host, "POST", "/trash/list");
+  ok(list.body.result.items.some(item => item.id === SID), "会话已出现在回收站");
+
+  const ver = await call(host, "GET", "/version");
+  eq(ver.body.result.version, mod.version, "GET /version 返回当前版本");
+  await rm(home, { recursive: true, force: true });
+}
+
+// ───────────────────────── 4f. fork 血缘断开 ─────────────────────────
+
+console.log("\n[4f] 删除父会话后 fork 的 parentSession 被摘掉");
+{
+  const { home } = await makeHome();
+  const FORK = "session-fork-7777";
+  await mkdir(join(home, "sessions", PROJ, FORK), { recursive: true });
+  await writeFile(join(home, "sessions", PROJ, FORK, "session.jsonl"),
+    JSON.stringify({ type: "session", id: FORK, cwd: "F:\\work\\demo", createdAt: 1, isSeeded: true, parentSession: SID }) + "\n"
+    + JSON.stringify({ type: "turn/start", time: 2 }) + "\n");
+  const host = makeHost(home);
+  mod.apply(host.ctx);
+
+  const trashed = await call(host, "POST", "/trash", { sessionId: SID });
+  eq(trashed.body.result.forkBranchesKept, 1, "fork 分支原地保留");
+  eq(trashed.body.result.forkBranchesDetached, 1, "fork 血缘已断开");
+  const lines = (await readFile(join(home, "sessions", PROJ, FORK, "session.jsonl"), "utf8")).split("\n");
+  const header = JSON.parse(lines[0]);
+  eq(header.id, FORK, "fork 会话 id 不变");
+  ok(!("parentSession" in header), "parentSession 已移除");
+  await rm(home, { recursive: true, force: true });
 }
 
 // ───────────────────────── 5. 边界与错误路径 ─────────────────────────
@@ -673,20 +773,58 @@ console.log("\n[9] 客户端 bundle（slot 注册与语言包）");
   };
   exportsObj.apply(ctx);
   const slotNames = registrations.map(r => r.name);
-  for (const need of ["sidebar.workspaces.session.menu.item", "sidebar.footer.action", "shell.overlay"]) {
+  for (const need of ["sidebar.workspaces.session.menu.item", "shell.overlay", "settings.section"]) {
     ok(slotNames.includes(need), `注册到 slot: ${need}`);
+  }
+  ok(!slotNames.includes("sidebar.footer.action"), "侧栏底部入口已移除");
+  const settingsSection = registrations.find(r => r.name === "settings.section");
+  ok(settingsSection !== undefined && settingsSection.items.length === 1, "注册了设置页分区 settings.section");
+  if (settingsSection) {
+    eq(settingsSection.items[0].spec.id, "session-cleaner-trash", "设置分区 id 正确");
+    eq(settingsSection.items[0].spec.order, 45, "设置分区排在插件市场（40）之后");
+    ok(typeof settingsSection.items[0].spec.label === "function", "设置分区有 label thunk");
+    ok(typeof settingsSection.items[0].component === "function", "设置分区有组件");
   }
   ok(registrations.every(r => r.items.every(i => i && i.spec && i.spec.id)), "每个注册项都有 id");
   const overlayCount = registrations.find(r => r.name === "shell.overlay")?.items.length ?? 0;
   eq(overlayCount, 2, "shell.overlay 注册了 toast 与回收站面板两个");
   eq(dictionaries.length, 1, "注册了一份语言包");
   const zh = dictionaries[0].dicts.zh, en = dictionaries[0].dicts.en;
-  for (const key of ["trash.restored", "trash.restoredArchived", "trash.restoredMixed", "trash.purged", "toast.trashed", "menu.delete"]) {
+  for (const key of ["trash.restored", "trash.restoredArchived", "trash.restoredMixed", "trash.purged", "toast.trashed", "toast.trashedKeptForks", "page.allDelete", "page.view", "menu.delete"]) {
     ok(typeof zh[key] === "string" && zh[key] !== "", `中文语言包有 ${key}`);
     ok(typeof en[key] === "string" && en[key] !== "", `英文语言包有 ${key}`);
   }
   eq(Object.keys(zh).length, Object.keys(en).length, "中英文语言包键数一致（不会漏译）");
   ok(effects.some(l => String(l).includes("styles")), "注入了样式 effect");
+}
+
+// ───────────────────────── 9b. 审计日志 ─────────────────────────
+
+console.log("\n[9b] 审计日志");
+{
+  const { home } = await makeHome();
+  const host = makeHost(home);
+  mod.apply(host.ctx);
+  const auditPath = join(home, "dsh-session-cleaner", "audit.log");
+  const readAudit = async () => (await readFile(auditPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+
+  await call(host, "POST", "/trash", { sessionId: SID });
+  let lines = await readAudit();
+  eq(lines.at(-1).action, "trash", "删除写审计 trash");
+  eq(lines.at(-1).sessionId, SID, "审计记下会话 id");
+  ok(typeof lines.at(-1).time === "string" && lines.at(-1).time.includes("T"), "审计带 ISO 时间戳");
+
+  await call(host, "POST", "/trash/restore", { sessionId: SID });
+  lines = await readAudit();
+  eq(lines.at(-1).action, "restore", "恢复写审计 restore");
+  eq(lines.at(-1).sessionId, SID, "恢复审计的会话 id 正确");
+
+  await call(host, "POST", "/trash", { sessionId: SID });
+  await call(host, "POST", "/trash/delete", { sessionIds: [SID] });
+  lines = await readAudit();
+  eq(lines.at(-1).action, "purge", "彻底删除写审计 purge");
+  eq(lines.at(-1).sessionId, SID, "彻底删除审计的会话 id 正确");
+  await rm(home, { recursive: true, force: true });
 }
 
 // ───────────────────────── 10. 截图声明与仓库一致性 ─────────────────────────
