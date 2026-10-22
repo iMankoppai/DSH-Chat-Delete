@@ -157,6 +157,10 @@ Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
 
+### 0.9.1 — selection mode: whole row is clickable
+
+- In selection mode, clicking any non-interactive part of a row (title, date, empty space) toggles it; buttons, selects and links keep their own behaviour
+
 ### 0.9.0 — reliability and session management
 
 - Idempotent trash, restore preflight and resumable journals, ordered startup reconciliation, retryable cleanup.

@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-cleaner",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "DSH 会话清理插件：删除至回收站、撤销与可继续恢复，支持子会话级联、归档管理、正文搜索、批量处理、Markdown/JSON 导出及可配置保留期。",
   "license": "MIT",
   "keywords": [
