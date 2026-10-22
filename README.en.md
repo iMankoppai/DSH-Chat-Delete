@@ -52,6 +52,19 @@ Grab the latest archive from the [Releases page](https://github.com/jackxiao17/d
 - `0.1.x` is untested: that line went through v0→v4 format migrations and large API changes, so it is not recommended
 - If a major DSH upgrade breaks the plugin, the symptom is a missing menu item/button or an error on an action — session data is never harmed. Binned data stays under `~/.dsh/dsh-session-cleaner/trash/` and can be moved back by hand to `sessions/<proj>/<id>/`
 
+## Upgrading to 0.9.0
+
+This version is covered by mock-host, real temporary-filesystem and settings-component regression tests. Its UI has not yet been checked in a running DSH instance; the DSH 0.2.1-rc.2 live validation below refers to earlier versions.
+
+- The delete toast offers Undo for 8 seconds. Sessions remain recoverable from the bin afterwards.
+- Retention supports 7 / 30 / 90 days or manual cleanup only (default: 30). Each entry shows its expected cleanup date; expiry takes effect at the next cleanup. Shortening retention also affects existing entries.
+- Both tabs support title-or-body search with snippets and cancellation. Compact search results are cached against file size and modification time.
+- Lists show 100 entries per page. Select all matching spans all filtered pages. Batch progress is visible; failed entries remain selected with an error for retry.
+- Export Markdown or JSON from each row. Markdown includes user/assistant text; JSON preserves original log events. Export uses full text, with a 64 MiB decoded-log limit, and covers the selected session only, not its subagents.
+- Duplicate deletion preserves existing bin data. Restore preflights all destinations and journals progress so interrupted restores can continue. Partial restores cannot be permanently deleted.
+- Failed cache/task cleanup keeps a retryable cleanup record. Disk usage includes descendants. Search parses lines and decodes frames with a cumulative 256 MiB limit; incomplete searches report errors.
+- Manual mode never automatically purges entries. A damaged settings file disables automatic cleanup.
+
 ## Usage
 
 1. Session `···` → **Delete**: moves straight into the recycle bin, with a "✓ session moved to the recycle bin" toast (no confirm dialog — it is recoverable)
@@ -62,7 +75,7 @@ Grab the latest archive from the [Releases page](https://github.com/jackxiao17/d
    - Select items, then **Restore selected / Delete selected forever** (with confirmation), or empty the whole bin
 4. **View chat log**: each session's "view chat log" opens the per-turn questions with the assistant's replies (Markdown rendered, long replies elided in the middle, body keywords still searchable)
 5. Restore: the directory moves back, the workspace accounting is re-attached **at its original slot**, the projection-cache row is restored verbatim, and the pin and archive flag come back (a session that was archived returns to the archive — the toast says where it went)
-6. The bin keeps items for **30 days**: it is purged once at startup and then every **6 hours** (so a long-running DSH does not skip it); the panel shows the next purge time
+6. Retention defaults to **30 days**, with 7 / 90 days and manual-only mode available. Startup reconciliation finishes before cleanup; automatic cleanup then runs every **6 hours**, and each entry shows its expected cleanup date.
 
 ## What each step touches
 
@@ -80,7 +93,7 @@ Grab the latest archive from the [Releases page](https://github.com/jackxiao17/d
 ## Known limits
 
 - DSH's plugin interfaces carry no official stability promise; a major upgrade can break the plugin — the symptom is a missing menu item/button or an error on an action, never damage to session data
-- The bin occupies disk space (the panel shows the total) and is capped by the 30-day retention
+- The bin occupies disk space (the panel shows the total) and is cleared by the configured retention (30 days by default); manual-only mode requires you to manage disk usage
 - **Schedules are not removed while a session sits in the bin**: for a reminder whose session is gone the host only logs a warning — it does not recreate the session and does not retry. Use "delete forever" to clear them. The reason for the split is that the host's `schedule` service **cannot recreate a task faithfully** (a new task gets a new id and an empty delivery history), so deleting at bin time would make a reversible step irreversible
 - **Restore is not guaranteed to be byte-identical to the moment before deletion**: an archived session returns into the archive (it does not jump into the sidebar), and if its anchor session has been deleted it stays at the top of the sidebar (the panel reports "position not restored" honestly)
 - **Two log directories for the same id are refused**: that is a corrupt layout the host itself refuses to resolve, so the plugin lists the paths for you to handle by hand instead of deleting one copy, leaving the other, and reporting success
@@ -107,7 +120,7 @@ Key points:
 
 - **Pure code changes need no `pnpm install`** — overwrite the files and restart DSH. Only the first install, or a change to `package.json` dependencies, needs another run: `node "%DSH_HOME%\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.cjs" install -C %DSH_HOME%\profiles\desktop`
 - **Why both copies**: the same-named files in those two directories are hard links (one copy of the data on disk), but a copy method that deletes the old file first (what many tools' "safe save" does) breaks the link, leaving `local` new and `node_modules` old — DSH then keeps loading the old code. Overwriting both avoids this.
-- **Bump the version in both places while iterating**: `version` in `package.json` and `buildId` in `lib/index.js`. The plugin logs `dsh-session-cleaner v<version>` at startup, so one look at the log after a restart tells you whether the new version really took effect (in 2026-10 a bumped `package.json` with a forgotten `buildId` left the log showing the old number — always change both).
+- **Change the version only in package.json**. The server export, startup log and settings page read this single value.
 - Once the change is verified, commit and push to this repository so GitHub matches what you run locally; keep the tag, the Release and the version inside the zip aligned too.
 
 To sync to this machine without publishing, run `scripts/sync-deploy.ps1` (or double-click `scripts/sync-deploy.cmd`): it runs `node --check` on `lib/*.js`, copies them to both install locations above, and reminds you to restart DSH.
@@ -116,7 +129,7 @@ To sync to this machine without publishing, run `scripts/sync-deploy.ps1` (or do
 
 `scripts/release.ps1` is a maintainer tool (it does not take part in the plugin's runtime and is not packed into the release — `package.json`'s `files` lists `lib`, `cordis.patch.yml` and the READMEs). It does these steps in order:
 
-1. Verify that `package.json#version` and `lib/index.js#buildId` agree (it aborts otherwise, to prevent the "log shows the old version" problem again)
+1. Verify the exported version and run syntax checks and all regression tests; any failure stops the release
 2. Build `dsh-session-cleaner-<version>.zip` and print its SHA256
 3. Overwrite both directories under `~/.dsh/profiles/desktop/` (`local\` and `node_modules\`)
 4. `git commit` → tag `v<version>` → push `main` and the tag
@@ -143,6 +156,14 @@ node scripts\verify.mjs
 Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
+
+### 0.9.0 — reliability and session management
+
+- Idempotent trash, restore preflight and resumable journals, ordered startup reconciliation, retryable cleanup.
+- Correct body-only matches, snippets, cancellation, cached searches, cumulative decoding limits and pagination.
+- Undo, configurable retention, cleanup dates, Markdown/JSON export, batch progress and failed-item retries.
+- Single version source, stable Release comparisons, automatic release checks and side-effect-free DryRun.
+- Sync icons, locales and documentation along with code.
 
 ### 0.8.3 (selection mode)
 

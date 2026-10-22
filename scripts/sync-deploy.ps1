@@ -27,7 +27,7 @@ foreach ($f in $files) {
   if ($LASTEXITCODE -ne 0) { throw "语法检查失败: $($f.Name)" }
 }
 
-$extras = @("package.json", "cordis.patch.yml") |
+$extras = @("package.json", "cordis.patch.yml", "icon.svg", "README.md", "README.en.md") |
   ForEach-Object { Join-Path $project $_ } |
   Where-Object { Test-Path -LiteralPath $_ }
 
@@ -39,6 +39,10 @@ foreach ($t in $targets) {
   foreach ($f in $extras) {
     Copy-Item -LiteralPath $f -Destination (Join-Path $parent (Split-Path $f -Leaf)) -Force
   }
+  $localeTarget = Join-Path $parent 'locale'
+  New-Item -ItemType Directory -Path $localeTarget -Force | Out-Null
+  Get-ChildItem -LiteralPath (Join-Path $project 'locale') -Filter *.json -File |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $localeTarget -Force }
 }
 
 if (-not $Quiet) {

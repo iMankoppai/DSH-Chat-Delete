@@ -884,5 +884,10 @@ console.log("\n[10] screenshots.json 与 README 图片");
   ok(enHead.includes("README.md"), "英文版顶部有简体中文链接");
 }
 
+const { runRegressions } = await import("./regressions.mjs");
+await runRegressions({ mod, makeHome, makeHost, call, ok, eq, SID, PROJ, ROOT });
+const { runClientRegressions } = await import("./client-regressions.mjs");
+await runClientRegressions({ ROOT, ok, eq });
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

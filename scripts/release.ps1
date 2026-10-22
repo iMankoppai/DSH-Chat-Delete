@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     维护者工具，不属于插件运行时（不出现在 package.json 的 files 列表里，不会被装进发行包）。
-    版本号以 package.json 的 version 为唯一来源，脚本会校验 lib/index.js 的 buildId 是否一致。
+    版本号统一读取 package.json，打包前运行语法检查与完整回归验证。
 
     鉴权与代理：
       - 优先用 GitHub CLI（已登录则直接使用）；
@@ -67,23 +67,33 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "package.json 的 version 不�
 $tag = "v$version"
 Write-Ok "package.json version = $version  (标签 $tag)"
 
-$indexPath = Join-Path $repoRoot 'lib\index.js'
-$indexText = Get-Content -LiteralPath $indexPath -Raw
-$buildMatch = [regex]::Match($indexText, 'buildId\s*=\s*"dsh-session-cleaner v([^"]+)"')
-if (-not $buildMatch.Success) { throw 'lib/index.js 里找不到 buildId = "dsh-session-cleaner vX.Y.Z"' }
-$buildVersion = $buildMatch.Groups[1].Value
+$buildVersion = & node --input-type=module -e 'import { version } from "./lib/index.js"; console.log(version)'
+if ($LASTEXITCODE -ne 0) { throw '无法读取插件版本' }
 if ($buildVersion -ne $version) {
-    throw "版本号不一致：package.json=$version，lib/index.js buildId=v$buildVersion。请先把两处改成同一个版本号。"
+    throw "插件导出版本与 package.json 不一致: $buildVersion / $version"
 }
-Write-Ok "lib/index.js buildId = v$buildVersion（与 package.json 一致）"
+Write-Ok "插件导出版本 = v$buildVersion（与 package.json 一致）"
+
+if ($DryRun) {
+    Write-Plan "运行语法与回归验证；打包 dsh-session-cleaner-$version.zip"
+    if (-not $SkipSync) { Write-Plan "同步到 $DshHome 下的 local 与 node_modules 安装目录" }
+    if (-not $SkipGit) { Write-Plan "提交改动，推送 main 与 $tag 标签" }
+    if (-not $SkipRelease) { Write-Plan "创建 GitHub Release 并上传发行包" }
+    return
+}
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'lib') -Filter *.js -File) {
+    & node --check $file.FullName
+    if ($LASTEXITCODE -ne 0) { throw "语法验证失败: $($file.Name)" }
+}
+& node (Join-Path $repoRoot 'scripts\verify.mjs')
+if ($LASTEXITCODE -ne 0) { throw '回归验证失败，已停止发版' }
 
 # ── 2. 打包 zip ───────────────────────────────────────────────────────
 Write-Step '2/7 打包发行 zip'
 $zipName = "dsh-session-cleaner-$version.zip"
 $zipPath = Join-Path $repoRoot $zipName
-$stage = Join-Path $env:TEMP "scl-release-stage-$version"
+$stage = Join-Path ([System.IO.Path]::GetFullPath($env:TEMP)) ("scl-release-stage-" + [guid]::NewGuid().ToString('N'))
 $stageRoot = Join-Path $stage 'dsh-session-cleaner'
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $stageRoot 'lib') -Force | Out-Null
 foreach ($f in 'package.json', 'README.md', 'README.en.md', 'LICENSE', 'cordis.patch.yml') {
     Copy-Item -LiteralPath (Join-Path $repoRoot $f) -Destination $stageRoot -Force
@@ -93,6 +103,8 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'lib\index.js')  -Destination (Join-
 # 图标与本地化：插件页的图标 / 标题 / 描述依赖它们，必须随发行包一起分发
 Copy-Item -LiteralPath (Join-Path $repoRoot 'icon.svg') -Destination $stageRoot -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot 'locale')   -Destination $stageRoot -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot 'assets')   -Destination $stageRoot -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot 'screenshots.json') -Destination $stageRoot -Force
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path $stageRoot -DestinationPath $zipPath -CompressionLevel Optimal
 $sha = (Get-FileHash $zipPath -Algorithm SHA256).Hash
@@ -115,8 +127,13 @@ if ($SkipSync) {
         Copy-Item -LiteralPath (Join-Path $repoRoot 'lib\index.js')  -Destination (Join-Path $t 'lib\index.js')  -Force
         Copy-Item -LiteralPath (Join-Path $repoRoot 'package.json')  -Destination (Join-Path $t 'package.json')  -Force
         Copy-Item -LiteralPath (Join-Path $repoRoot 'icon.svg')      -Destination (Join-Path $t 'icon.svg')      -Force
-        if (Test-Path (Join-Path $t 'locale')) { Remove-Item (Join-Path $t 'locale') -Recurse -Force }
-        Copy-Item -LiteralPath (Join-Path $repoRoot 'locale')        -Destination $t -Recurse -Force
+        $localeTarget = Join-Path $t 'locale'
+        New-Item -ItemType Directory -Path $localeTarget -Force | Out-Null
+        Get-ChildItem -LiteralPath (Join-Path $repoRoot 'locale') -Filter *.json -File |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $localeTarget -Force }
+        foreach ($extra in 'cordis.patch.yml', 'README.md', 'README.en.md') {
+            Copy-Item -LiteralPath (Join-Path $repoRoot $extra) -Destination $t -Force
+        }
         $installed = (Get-Content -LiteralPath (Join-Path $t 'package.json') -Raw | ConvertFrom-Json).version
         Write-Ok "$t  ->  $installed"
     }
@@ -127,6 +144,8 @@ Write-Step '4/7 git 提交 / 标签 / 推送'
 if ($SkipGit) {
     Write-Skip '按参数要求跳过'
 } else {
+    $releaseBranch = git branch --show-current
+    if ($LASTEXITCODE -ne 0 -or $releaseBranch -ne 'main') { throw '发版必须在 main 分支上执行' }
     $dirty = @(git status --porcelain)
     if ($dirty.Count -eq 0) {
         Write-Ok '没有待提交改动'
@@ -134,19 +153,25 @@ if ($SkipGit) {
         Write-Plan "提交 $($dirty.Count) 个文件并推送 main"
     } else {
         git add -A
+        if ($LASTEXITCODE -ne 0) { throw 'git add 失败' }
         git commit -m "release: $tag" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'git commit 失败' }
         Write-Ok "已提交: release: $tag"
         git push origin main
+        if ($LASTEXITCODE -ne 0) { throw '推送 main 失败，已停止发版' }
         Write-Ok 'main 已推送'
     }
     $tagExists = [bool](git tag -l $tag)
     if ($tagExists) {
+        if ((git rev-list -n 1 $tag) -ne (git rev-parse HEAD)) { throw "标签 $tag 不指向当前提交，已停止发版" }
         Write-Ok "标签 $tag 已存在（指向 $(git rev-list -n 1 $tag))"
     } elseif ($DryRun) {
         Write-Plan "创建标签 $tag 并推送"
     } else {
         git tag -a $tag -m "dsh-session-cleaner $tag"
+        if ($LASTEXITCODE -ne 0) { throw '创建标签失败' }
         git push origin $tag
+        if ($LASTEXITCODE -ne 0) { throw '推送标签失败' }
         Write-Ok "标签 $tag 已创建并推送"
     }
 }
@@ -154,11 +179,13 @@ if ($SkipGit) {
 # ── 5. 取得 GitHub 令牌 ────────────────────────────────────────────────
 Write-Step '5/7 准备 GitHub 鉴权'
 $useGh = $false
-if (Get-Command gh -ErrorAction SilentlyContinue) {
+if (-not $SkipRelease -and (Get-Command gh -ErrorAction SilentlyContinue)) {
     gh auth status *> $null
     if ($LASTEXITCODE -eq 0) { $useGh = $true }
 }
-if ($useGh) {
+if ($SkipRelease) {
+    Write-Skip '本次不创建 Release，无需鉴权'
+} elseif ($useGh) {
     Write-Ok '检测到已登录的 GitHub CLI，用 gh 调用 API'
 } else {
     if (-not $Token) { $Token = $env:GH_TOKEN }
@@ -287,4 +314,7 @@ Write-Host "    SHA256    : $sha"
 Write-Host "    下载直链  : $assetUrl"
 Write-Host "    Release   : https://github.com/$repoSlug/releases/tag/$tag"
 Write-Host ''
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+$resolvedStage = [System.IO.Path]::GetFullPath($stage)
+$tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+if (-not $resolvedStage.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '临时打包目录超出预期范围，已停止清理' }
+if (Test-Path -LiteralPath $resolvedStage) { Remove-Item -LiteralPath $resolvedStage -Recurse -Force -ErrorAction SilentlyContinue }
