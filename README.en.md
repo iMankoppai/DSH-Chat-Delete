@@ -157,6 +157,11 @@ Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
 
+### 0.9.2 — consistent row actions
+
+- Row action order is now View → Export → Unarchive (trash: View → Export → Delete forever → Restore)
+- View, Export and Unarchive share the same height and minimum width for a tidier row
+
 ### 0.9.1 — selection mode: whole row is clickable
 
 - In selection mode, clicking any non-interactive part of a row (title, date, empty space) toggles it; buttons, selects and links keep their own behaviour
