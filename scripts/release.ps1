@@ -237,7 +237,7 @@ Write-Ok "目标仓库: $repoSlug"
 $existingRelease = $null
 if (-not $SkipRelease) {
     if ($useGh) {
-        $ghOut = gh release view $tag --json url 2>$null
+        $ghOut = gh release view $tag -R $repoSlug --json url 2>$null
         if ($LASTEXITCODE -eq 0 -and $ghOut) { $existingRelease = @{ html_url = (($ghOut | ConvertFrom-Json).url) } }
     } elseif ($env:GH_TOKEN) {
         $exFile = Join-Path $env:TEMP "scl-release-exists-$version.json"
@@ -278,7 +278,9 @@ if ($SkipRelease) {
     ) | Set-Content -LiteralPath $notesPath -Encoding utf8
 
     if ($useGh) {
-        gh release create $tag --title "dsh-session-cleaner $tag" --notes-file $notesPath $zipPath
+        # 必须显式 -R：本仓库可能同时挂着 origin 与 upstream，gh 不指定时会解析到上游
+        gh release create $tag -R $repoSlug --title "dsh-session-cleaner $tag" --notes-file $notesPath $zipPath
+        if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败（gh 退出码 $LASTEXITCODE）: 标签 $tag 是否已推送到 $repoSlug?" }
         Write-Ok "Release $tag 已创建并上传"
     } else {
         $api = "https://api.github.com/repos/$repoSlug/releases"
