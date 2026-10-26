@@ -103,8 +103,12 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'lib\index.js')  -Destination (Join-
 # 图标与本地化：插件页的图标 / 标题 / 描述依赖它们，必须随发行包一起分发
 Copy-Item -LiteralPath (Join-Path $repoRoot 'icon.svg') -Destination $stageRoot -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot 'locale')   -Destination $stageRoot -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot 'assets')   -Destination $stageRoot -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot 'screenshots.json') -Destination $stageRoot -Force
+# 截图是可选的：仓库里没有 assets / screenshots.json 时不该让打包失败
+foreach ($optional in 'assets', 'screenshots.json') {
+    $src = Join-Path $repoRoot $optional
+    if (-not (Test-Path -LiteralPath $src)) { Write-Warn2 "没有 $optional，跳过（截图是可选的）"; continue }
+    Copy-Item -LiteralPath $src -Destination $stageRoot -Recurse -Force
+}
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path $stageRoot -DestinationPath $zipPath -CompressionLevel Optimal
 $sha = (Get-FileHash $zipPath -Algorithm SHA256).Hash
@@ -224,7 +228,7 @@ public static class SclCred {
     }
 }
 
-$repoSlug = 'jackxiao17/dsh-session-cleaner'
+$repoSlug = 'iMankoppai/DSH-Chat-Delete'
 $remoteUrl = (git remote get-url origin) 2>$null
 if ($remoteUrl -match 'github\.com[:/]([^/]+)/([^/.]+)') { $repoSlug = "$($matches[1])/$($matches[2])" }
 Write-Ok "目标仓库: $repoSlug"

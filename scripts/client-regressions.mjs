@@ -51,7 +51,7 @@ export async function runClientRegressions({ ROOT, ok, eq }) {
         result = { results: payload.sessionIds.map(sessionId => ({ sessionId, deleted: sessionId !== "b", error: sessionId === "b" ? "locked b" : undefined })) };
         trash = trash.filter(item => !result.results.some(entry => entry.sessionId === item.id && entry.deleted));
       } else if (url.endsWith("/trash/restore")) {
-        restoreCalls++; trash = trash.filter(item => item.id !== payload.sessionId); result = { filesRestored: true };
+        restoreCalls++; trash = trash.filter(item => item.id !== payload.sessionId); result = { filesRestored: true, forksReattached: 1 };
       } else if (url.endsWith("/session/export")) result = { filename: "a.md", content: "# saved", mime: "text/markdown" };
       else if (url.endsWith("/trash")) {
         if (payload.sessionId === "b") return { json: async () => ({ ok: false, error: "locked b" }) };
@@ -124,6 +124,7 @@ export async function runClientRegressions({ ROOT, ok, eq }) {
     ok(Boolean(undo), "删除成功提示提供撤销按钮");
     await undo.props.onClick(); await ui.settle();
     eq(ui.restoreCalls, 1, "撤销调用恢复接口");
+    ok(text(ui.renderToast()).includes("已还原 1 个 fork 血缘"), "撤销后提示里报告 fork 血缘已还原");
     ui.dispose();
   }
   {

@@ -117,6 +117,34 @@ export async function runRegressions({ mod, makeHome, makeHost, call, ok, eq, SI
     ok(cancelled, "过时搜索可取消流式读取");
     await rm(home, { recursive: true, force: true });
   }
+  {
+    // fork 血缘改写要重写整个日志：zstd 多帧格式必须仍可解析，事件不能丢。
+    const { home } = await makeHome();
+    const FORK = "session-fork-zstd";
+    const dir = join(home, "sessions", PROJ, FORK);
+    const logPath = join(dir, "session.v4.jsonl.zstd");
+    await mkdir(dir, { recursive: true });
+    const headerLine = JSON.stringify({ type: "session", id: FORK, cwd: "F:\\work\\demo", createdAt: 1, isSeeded: true, parentSession: SID }) + "\n";
+    const bodyLine = JSON.stringify({ type: "turn/start", time: 2 }) + "\n";
+    await writeFile(logPath, Buffer.concat([zstdCompressSync(headerLine), zstdCompressSync(bodyLine)]));
+    const host = makeHost(home); mod.apply(host.ctx);
+
+    const trashed = await call(host, "POST", "/trash", { sessionId: SID });
+    eq(trashed.body.result.forkBranchesDetached, 1, "zstd 日志的 fork 也能摘掉血缘");
+    const afterDetach = [];
+    for await (const line of mod.readArtifactLines(logPath)) afterDetach.push(line);
+    eq(afterDetach.length, 2, "改写后日志行数不变（事件没丢）");
+    ok(!("parentSession" in JSON.parse(afterDetach[0])), "zstd 头行里的 parentSession 已移除");
+    ok(afterDetach[1].includes("turn/start"), "zstd 事件行原样保留");
+
+    const restored = await call(host, "POST", "/trash/restore", { sessionId: SID });
+    eq(restored.body.result.forksReattached, 1, "zstd 日志的 fork 血缘可还原");
+    const afterAttach = [];
+    for await (const line of mod.readArtifactLines(logPath)) afterAttach.push(line);
+    eq(JSON.parse(afterAttach[0]).parentSession, SID, "写回后头行带上原父会话");
+    ok(afterAttach[1].includes("turn/start"), "写回后事件行仍在");
+    await rm(home, { recursive: true, force: true });
+  }
   for (const [candidate, current, expected] of [
     ["0.10.0", "0.9.9", true], ["0.8.3", "0.9.0", false], ["0.9.0", "0.9.0", false],
     ["1.0.0-rc.10", "1.0.0-rc.2", true], ["1.0.0-rc.1", "1.0.0", false], ["1.0.0", "1.0.0-rc.9", true],

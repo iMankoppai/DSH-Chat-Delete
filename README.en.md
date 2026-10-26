@@ -8,29 +8,19 @@ A DSH (DeepSeek Harness) desktop plugin that puts a **"DSH Session Cleaner"** in
 
 Deleting a session is not just moving its log directory: every trace it left in DSH is handled too — the workspace accounting slot, its pin, its archive flag, and the projection-cache row (including the host's `.bak` copies). **A session with subagents moves as a whole tree**: the host cascades agent disposal only, so a child session's log directory, accounting and cache row would otherwise survive the parent. Restoring puts each of those back, **including the session's original position in the sidebar**. Permanently deleting a binned session also clears the schedules bound to it and removes its project directory once it is empty.
 
-**Fork branches are never deleted along with their parent**: a forked session is an independent copy of the parent's history and records `parentSession` only as lineage metadata. Deleting the parent takes the subagent tree but leaves the fork where it is, and the success toast tells you how many were kept.
+**Fork branches are never deleted along with their parent**: a forked session is an independent copy of the parent's history and records `parentSession` only as lineage metadata. Deleting the parent takes the subagent tree but leaves the fork where it is, and the success toast tells you how many were kept. The original parent is recorded in the bin snapshot before the lineage is detached, so **restoring the parent writes the fork's lineage back** — a step that used to be irreversible.
 
 Delete, restore and purge each append one JSON line to `~/.dsh/dsh-session-cleaner/audit.log` (time, action, session id, title, size, related counts); a failed audit write never blocks the operation.
 
-## Screenshots
+## Interface
 
-![A red Delete item added to the session ··· menu](assets/menu-delete.jpg)
+Settings → **Recycle bin** (last item in the left nav, trash icon) is a full management page: two tabs (Archived / Recycle bin), then search, workspace filter, sorting and selection mode, with View / Export / Restore / Delete forever on each row.
 
-A red **Delete** appears in the session `···` menu (below "Archive").
-
-![Session recycle bin panel: title and full-text search, workspace filter, sorting, restore and permanent delete](assets/recycle-bin.jpg)
-
-The **session recycle bin**: title/full-text search, workspace filter, sorting, restore and permanent delete.
-
-![Chat log viewer: per-turn questions and assistant replies](assets/chat-log.jpg)
-
-**View chat log**: per-turn questions and assistant replies, rendered as Markdown, with long replies elided in the middle.
-
-These images are declared by `screenshots.json` in the repository root (plugin marketplaces use it for their detail pages); the paths are relative to that file and point at images inside this repository.
+> Screenshots pending: the old ones came from the v0.7 UI and carried another machine's paths, so they were removed. To publish new ones, drop images into `assets/` and add a `screenshots.json` (1–8 relative paths) at the repository root.
 
 ## Download
 
-Grab the latest archive from the [Releases page](https://github.com/jackxiao17/dsh-session-cleaner/releases/latest) and unpack it to get a `dsh-session-cleaner/` folder; `git clone` works too.
+Grab the latest archive from the [Releases page](https://github.com/iMankoppai/DSH-Chat-Delete/releases/latest) and unpack it to get a `dsh-session-cleaner/` folder; `git clone` works too.
 
 ## Install
 
@@ -96,6 +86,7 @@ This version is covered by mock-host, real temporary-filesystem and settings-com
 - The bin occupies disk space (the panel shows the total) and is cleared by the configured retention (30 days by default); manual-only mode requires you to manage disk usage
 - **Schedules are not removed while a session sits in the bin**: for a reminder whose session is gone the host only logs a warning — it does not recreate the session and does not retry. Use "delete forever" to clear them. The reason for the split is that the host's `schedule` service **cannot recreate a task faithfully** (a new task gets a new id and an empty delivery history), so deleting at bin time would make a reversible step irreversible
 - **Restore is not guaranteed to be byte-identical to the moment before deletion**: an archived session returns into the archive (it does not jump into the sidebar), and if its anchor session has been deleted it stays at the top of the sidebar (the panel reports "position not restored" honestly)
+- **Fork lineage restoration has prerequisites**: deleting a parent detaches the fork's `parentSession` (so it no longer points at a missing session) and records the original value in the snapshot; restoring the parent writes it back. Forks **over 48 MB are left untouched** (rewriting means recompressing the whole log), so those stay detached and the restore message says so — likewise when the snapshot is missing or the fork itself is gone, which is skipped silently rather than reported as a failure
 - **Two log directories for the same id are refused**: that is a corrupt layout the host itself refuses to resolve, so the plugin lists the paths for you to handle by hand instead of deleting one copy, leaving the other, and reporting success
 - **Crash safety**: the snapshot is written before the files move and upgraded to its final state afterwards; startup runs a two-way reconciliation — a leftover "never moved" snapshot is rolled back (with subagents this is all-or-nothing: if any member is still at home, the ones already moved go back), and a bin directory without a snapshot is adopted as a "data incomplete" entry (visible and permanently deletable, but not restorable, because its original path is unknowable)
 - **0.7.0 removed two HTTP endpoints nobody called**: `POST /delete` (physical delete without the bin) and `POST /status`. Deletion now has a single path: move to the bin → delete forever
@@ -156,6 +147,15 @@ node scripts\verify.mjs
 Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 
 ## Changelog
+
+### 0.9.3 — fork lineage is restorable
+
+- The `parentSession` detached from a fork is now recorded in the bin snapshot and **written back when the parent is restored** — this used to be irreversible, so deleting and restoring still lost the lineage permanently
+- Lineage rewriting is one shared implementation (detach / attach) and attaching is idempotent: a header that already carries the right value is left alone
+- Detaching now happens after the files have moved, so a failed move never detaches lineage for nothing
+- A fork that was itself deleted, a log over 48 MB, or a missing snapshot is skipped and reported honestly (`forksReattached` / `forksSkipped`) without failing the restore; the size limit is surfaced in the message
+- A successful restore now says "**restored lineage for N fork branch(es)**" in both the undo toast and the settings-page notice
+- The verification suite grew to **350 assertions**, covering fork snapshotting, write-back, repeated delete→restore rounds, a vanished fork, old snapshots without the field, rewriting multi-frame zstd logs, and the lineage note in the undo toast
 
 ### 0.9.2 — consistent row actions
 
@@ -228,6 +228,10 @@ Release only when it ends with `N 通过 / 0 失败` (N passed / 0 failed).
 - **Locking is unified per session id**: restore and permanent delete can no longer interleave; batch operations take the batch slot first and each session slot afterwards
 - Removed the two uncalled endpoints `POST /delete` and `POST /status`
 - Fixed the stale source header comment claiming running sessions are always refused (the real behaviour is: the current turn is ended, then the session is deleted)
+
+## Origin
+
+This repository started from [jackxiao17/dsh-session-cleaner](https://github.com/jackxiao17/dsh-session-cleaner) (MIT) and has been maintained independently at [iMankoppai/DSH-Chat-Delete](https://github.com/iMankoppai/DSH-Chat-Delete) since v0.8.0. The upstream copyright notice is kept in [LICENSE](LICENSE).
 
 ## License
 
